@@ -1,0 +1,207 @@
+<!DOCTYPE html>
+<html lang="zh-TW">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>宴席桌次即時登記系統</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <style>
+        .table-card { transition: all 0.3s ease; }
+        .table-card:hover { transform: translateY(-5px); }
+        .full { background-color: #fee2e2; border-color: #ef4444; }
+        .available { background-color: #f0fdf4; border-color: #22c55e; }
+    </style>
+</head>
+<body class="bg-slate-50 min-h-screen">
+
+    <div class="max-w-6xl mx-auto px-4 py-8">
+        <div class="text-center mb-10">
+            <h1 class="text-4xl font-extrabold text-slate-800 mb-2">尊榮宴席登記</h1>
+            <p class="text-slate-500">即時同步桌次狀態，請登入後選擇您的座位</p>
+        </div>
+
+        <div id="admin-panel" class="hidden mb-8 bg-white p-6 rounded-xl shadow-md border-l-4 border-red-500">
+            <h2 class="text-xl font-bold text-red-600 mb-4 flex items-center">
+                <span>⚙️ 管理者設定</span>
+            </h2>
+            <div class="grid grid-cols-1 md:grid-cols-3 gap-6">
+                <div>
+                    <label class="block text-sm font-medium text-gray-700">總桌數 (1-30)</label>
+                    <input type="number" id="cfg-tables" min="1" max="30" class="mt-1 block w-full border rounded-md p-2">
+                </div>
+                <div>
+                    <label class="block text-sm font-medium text-gray-700">每桌人數 (4-10)</label>
+                    <input type="number" id="cfg-seats" min="4" max="10" class="mt-1 block w-full border rounded-md p-2">
+                </div>
+                <div class="flex items-end">
+                    <button onclick="saveSettings()" class="w-full bg-red-600 text-white py-2 rounded-md hover:bg-red-700 transition">更新配置並清空數據</button>
+                </div>
+            </div>
+        </div>
+
+        <div id="auth-section" class="max-w-md mx-auto bg-white p-8 rounded-2xl shadow-xl mb-10">
+            <div id="login-form">
+                <input type="text" id="username" placeholder="帳號" class="w-full mb-4 p-3 border rounded-lg focus:ring-2 focus:ring-blue-400 outline-none">
+                <input type="password" id="password" placeholder="密碼" class="w-full mb-6 p-3 border rounded-lg focus:ring-2 focus:ring-blue-400 outline-none">
+                <button onclick="login()" class="w-full bg-blue-600 text-white py-3 rounded-lg font-bold hover:bg-blue-700 transition">登入 / 自動註冊</button>
+            </div>
+            <div id="user-info" class="hidden text-center">
+                <p class="text-lg font-semibold">歡迎，<span id="display-user" class="text-blue-600"></span></p>
+                <button onclick="logout()" class="mt-2 text-sm text-gray-500 underline">登出系統</button>
+            </div>
+        </div>
+
+        <div id="table-grid" class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-6">
+            </div>
+    </div>
+
+    <div id="modal" class="hidden fixed inset-0 bg-black/50 backdrop-blur-sm flex items-center justify-center z-50">
+        <div class="bg-white p-8 rounded-2xl shadow-2xl w-96">
+            <h3 id="modal-title" class="text-2xl font-bold mb-4"></h3>
+            <div class="mb-4">
+                <p class="text-sm text-gray-500 mb-2">目前已登記人員：</p>
+                <ul id="guest-list" class="bg-gray-50 p-3 rounded-lg text-sm mb-4 min-h-[50px]"></ul>
+            </div>
+            <input type="text" id="guest-name" placeholder="請輸入您的顯示姓名" class="w-full p-3 border rounded-lg mb-6">
+            <div class="flex gap-3">
+                <button onclick="closeModal()" class="flex-1 py-3 bg-gray-200 rounded-lg">取消</button>
+                <button id="confirm-btn" class="flex-1 py-3 bg-green-600 text-white rounded-lg font-bold">確認加入</button>
+            </div>
+        </div>
+    </div>
+
+    <script type="module">
+        import { initializeApp } from "https://www.gstatic.com/firebasejs/9.15.0/firebase-app.js";
+        import { getDatabase, ref, set, onValue, update, get } from "https://www.gstatic.com/firebasejs/9.15.0/firebase-database.js";
+
+        const firebaseConfig = {
+            // *** 請在此貼上你的 Firebase 配置 ***
+            apiKey: "YOUR_API_KEY",
+            databaseURL: "YOUR_DATABASE_URL",
+            projectId: "YOUR_PROJECT_ID",
+            storageBucket: "YOUR_STORAGE_BUCKET",
+            messagingSenderId: "YOUR_SENDER_ID",
+            appId: "YOUR_APP_ID"
+        };
+
+        const app = initializeApp(firebaseConfig);
+        const db = getDatabase(app);
+
+        // 狀態變數
+        let currentUser = null;
+        let currentSettings = { total: 10, seats: 8 };
+        let allTables = {};
+
+        // --- 初始化與監聽 ---
+        onValue(ref(db, 'settings'), (snapshot) => {
+            if (snapshot.exists()) {
+                currentSettings = snapshot.val();
+                renderTables();
+            }
+        });
+
+        onValue(ref(db, 'tables'), (snapshot) => {
+            allTables = snapshot.val() || {};
+            renderTables();
+        });
+
+        // --- 登入邏輯 ---
+        window.login = async () => {
+            const user = document.getElementById('username').value;
+            const pass = document.getElementById('password').value;
+            if (!user || !pass) return alert("請輸入帳號密碼");
+
+            if (user === "admin" && pass === "admin") {
+                currentUser = "admin";
+                document.getElementById('admin-panel').classList.remove('hidden');
+            } else {
+                const userRef = ref(db, `users/${user}`);
+                const snapshot = await get(userRef);
+                if (snapshot.exists()) {
+                    if (snapshot.val().pass !== pass) return alert("密碼錯誤！");
+                } else {
+                    await set(userRef, { pass: pass });
+                    alert("新帳號已註冊並登入");
+                }
+                currentUser = user;
+            }
+            document.getElementById('login-form').classList.add('hidden');
+            document.getElementById('user-info').classList.remove('hidden');
+            document.getElementById('display-user').innerText = currentUser;
+        };
+
+        // --- 管理者功能 ---
+        window.saveSettings = async () => {
+            const newT = parseInt(document.getElementById('cfg-tables').value);
+            const newS = parseInt(document.getElementById('cfg-seats').value);
+            
+            // 檢查是否縮減導致資料遺失 (安全提醒)
+            if (newT < currentSettings.total) {
+                for(let i = newT + 1; i <= currentSettings.total; i++) {
+                    if (allTables[`t${i}`]) {
+                        alert(`第 ${i} 桌已有資料，請先清空資料後再縮減桌數。`);
+                        return;
+                    }
+                }
+            }
+
+            await set(ref(db, 'settings'), { total: newT, seats: newS });
+            alert("配置已更新");
+        };
+
+        // --- 渲染桌次介面 ---
+        function renderTables() {
+            const container = document.getElementById('table-grid');
+            container.innerHTML = '';
+
+            for (let i = 1; i <= currentSettings.total; i++) {
+                const tableId = `t${i}`;
+                const guests = allTables[tableId] || [];
+                const isFull = guests.length >= currentSettings.seats;
+
+                const div = document.createElement('div');
+                div.className = `table-card p-6 border-2 rounded-2xl cursor-pointer ${isFull ? 'full' : 'available shadow-sm bg-white'}`;
+                div.innerHTML = `
+                    <div class="flex justify-between items-center mb-4">
+                        <span class="text-xl font-black text-slate-700">第 ${i} 桌</span>
+                        <span class="text-xs px-2 py-1 rounded-full ${isFull ? 'bg-red-500 text-white' : 'bg-green-100 text-green-700'}">
+                            ${isFull ? '已滿' : '可預約'}
+                        </span>
+                    </div>
+                    <div class="text-3xl font-bold text-center my-4">${guests.length} <span class="text-sm text-gray-400">/ ${currentSettings.seats} 人</span></div>
+                    <div class="text-xs text-gray-500 truncate">${guests.map(g => g.name).join(', ') || '尚無人登記'}</div>
+                `;
+                div.onclick = () => openModal(i, guests);
+                container.appendChild(div);
+            }
+        }
+
+        // --- 登記流程 ---
+        window.openModal = (id, guests) => {
+            if (!currentUser) return alert("請先登入帳號");
+            const isFull = guests.length >= currentSettings.seats;
+            if (isFull) return alert("該桌已滿，請選擇其他桌次");
+
+            document.getElementById('modal').classList.remove('hidden');
+            document.getElementById('modal-title').innerText = `登記第 ${id} 桌`;
+            document.getElementById('guest-list').innerHTML = guests.map(g => `<li>• ${g.name}</li>`).join('') || '目前尚無賓客';
+            
+            document.getElementById('confirm-btn').onclick = async () => {
+                const name = document.getElementById('guest-name').value;
+                if (!name) return alert("請輸入姓名");
+                
+                const updatedGuests = [...guests, { name: name, user: currentUser }];
+                await set(ref(db, `tables/t${id}`), updatedGuests);
+                closeModal();
+            };
+        };
+
+        window.closeModal = () => {
+            document.getElementById('modal').classList.add('hidden');
+            document.getElementById('guest-name').value = '';
+        };
+
+        window.logout = () => location.reload();
+    </script>
+</body>
+</html>
